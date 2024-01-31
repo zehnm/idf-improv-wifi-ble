@@ -15,8 +15,9 @@
 #include "improv.h"
 #include "misc.h"
 #include "button.h"
-#include "identify.h"
+#include "led_pattern.h"
 #include "wifi_connect.h"
+#include "ble_log_util.h"
 
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
@@ -44,7 +45,7 @@ uint16_t rpc_cmd_char_att_hdl;
 uint16_t rpc_result_char_att_hdl;
 uint16_t capabilities_char_att_hdl;
 
-static uint8_t status = STATE_STOPPED;
+static uint8_t status = 0xFF;  // undefined
 static uint8_t capabilities = 0;
 static uint8_t error = ERROR_NONE;
 static uint8_t rpc_result = 0;
@@ -144,7 +145,7 @@ static int improv_command(uint16_t conn_handle, uint16_t attr_handle, struct ble
         } else {
             ESP_LOGI(TAG, "RPC Command: Identify");
             // This command has no RPC result.
-            identify(LED_IMPROV_IDENTIFY);
+            led_pattern(LED_IMPROV_IDENTIFY);
         }
         break;
     case WIFI_SETTINGS:
@@ -203,14 +204,17 @@ void provision_wifi(struct ImprovCommand cmd)
     ESP_ERROR_CHECK(wifi_connect_sta(cmd.ssid, cmd.password, pdMS_TO_TICKS(CONFIG_IMPROV_WIFI_CONNECT_TIMEOUT * 1000)));
 
     // start connection timer
-    if (wifi_connect_timer) {
-        xTimerDelete(wifi_connect_timer, 0);
+    if (!wifi_connect_timer) {
+        wifi_connect_timer = xTimerCreate("wifi-connect-timeout",
+                                          pdMS_TO_TICKS(CONFIG_IMPROV_WIFI_CONNECT_TIMEOUT * 1000),
+                                          pdFALSE, NULL, on_wifi_connect_timeout);
+        if (wifi_connect_timer == NULL) {
+            ESP_LOGE(TAG, "Could not create authorized timer");
+            return;
+        }
     }
-    wifi_connect_timer = xTimerCreate("wifi-connect-timeout",
-                                      pdMS_TO_TICKS(CONFIG_IMPROV_WIFI_CONNECT_TIMEOUT * 1000),
-                                      false, NULL, on_wifi_connect_timeout);
     if (xTimerStart(wifi_connect_timer, 0) != pdPASS) {
-        ESP_LOGE(TAG, "Could not create wifi connect timer");
+        ESP_LOGE(TAG, "Could not start wifi connect timer");
     }
 }
 
@@ -221,7 +225,7 @@ void on_wifi_event(wifi_connect_event_t event)
         ESP_LOGI(TAG, "WiFi connected");
 
         if (wifi_connect_timer) {
-            xTimerDelete(wifi_connect_timer, 0);
+            xTimerStop(wifi_connect_timer, 0);
         }
 
         uint16_t length;
@@ -239,7 +243,13 @@ void on_wifi_event(wifi_connect_event_t event)
         free(data);
         break;
     case WIFI_STA_DISCONNECTED:
-        ESP_LOGI(TAG, "Failed to connect to WiFi");
+        ESP_LOGW(TAG, "Failed to connect to WiFi");
+        if (status == STATE_PROVISIONING) {
+            if (wifi_connect_timer) {
+                xTimerStop(wifi_connect_timer, 0);
+            }
+            on_wifi_connect_timeout();
+        }
         break;
     default:
         ESP_LOGW(TAG, "Ignoring unknown wifi event: %d", event);
@@ -248,6 +258,9 @@ void on_wifi_event(wifi_connect_event_t event)
 
 void on_wifi_connect_timeout()
 {
+    if (status != STATE_PROVISIONING) {
+        return;
+    }
     ESP_LOGW(TAG, "Timed out trying to connect to given WiFi network");
 
     wifi_disconnect();
@@ -255,11 +268,6 @@ void on_wifi_connect_timeout()
     // If the gadget is unable to connect an error is returned.
     improv_set_error(ERROR_UNABLE_TO_CONNECT);
     improv_set_state(STATE_AUTHORIZED);
-
-    // If the gadget required authorization, the authorization reset timeout should start over.
-#ifdef CONFIG_IMPROV_WIFI_AUTHENTICATION_BUTTON
-    start_authorized_timer();
-#endif
 }
 
 static int improv_rpc_result_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -354,8 +362,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         // A new connection was established or a connection attempt failed.
         ESP_LOGI("GAP", "BLE_GAP_EVENT_CONNECT %s", event->connect.status == 0 ? "OK" : "Failed");
         if (event->connect.status != 0) {
+            ESP_LOGI("GAP", "Connection attempt failed, starting advertisement.");
+            conn_hdl = 0;
             ble_app_advertise();
         } else {
+            conn_hdl = event->connect.conn_handle;
+            init_improv();
             ESP_LOGI("GAP", "status handle=%d, error handle=%d, rpc cmd handle=%d, rpc result handle=%d, capabilities handle=%d", status_char_att_hdl,
                      error_char_att_hdl,
                      rpc_cmd_char_att_hdl,
@@ -363,7 +375,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                      capabilities_char_att_hdl
                     );
         }
-        conn_hdl = event->connect.conn_handle;
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         // Connection terminated; resume advertising.
@@ -377,87 +388,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI("GAP", "BLE_GAP_EVENT_ADV_COMPLETE");
         ble_app_advertise();
         break;
-    case BLE_GAP_EVENT_SUBSCRIBE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_SUBSCRIBE: handle=%d", event->subscribe.attr_handle);
-        break;
-    case BLE_GAP_EVENT_CONN_UPDATE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_CONN_UPDATE");
-        break;
-    case BLE_GAP_EVENT_CONN_UPDATE_REQ:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_CONN_UPDATE_REQ");
-        break;
-    case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_L2CAP_UPDATE_REQ");
-        break;
-    case BLE_GAP_EVENT_TERM_FAILURE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_TERM_FAILURE");
-        break;
-    case BLE_GAP_EVENT_DISC:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_DISC");
-        break;
-    case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_DISC_COMPLETE");
-        break;
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_ENC_CHANGE");
-        break;
-    case BLE_GAP_EVENT_PASSKEY_ACTION:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PASSKEY_ACTION");
-        break;
-    case BLE_GAP_EVENT_NOTIFY_RX:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_NOTIFY_RX");
-        break;
-    case BLE_GAP_EVENT_NOTIFY_TX:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_NOTIFY_TX");
-        break;
-    case BLE_GAP_EVENT_MTU:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_MTU");
-        break;
-    case BLE_GAP_EVENT_IDENTITY_RESOLVED:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_IDENTITY_RESOLVED");
-        break;
-    case BLE_GAP_EVENT_REPEAT_PAIRING:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_REPEAT_PAIRING");
-        break;
-    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PHY_UPDATE_COMPLETE");
-        break;
-    case BLE_GAP_EVENT_EXT_DISC:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_EXT_DISC");
-        break;
-    case BLE_GAP_EVENT_PERIODIC_SYNC:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PERIODIC_SYNC");
-        break;
-    case BLE_GAP_EVENT_PERIODIC_REPORT:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PERIODIC_REPORT");
-        break;
-    case BLE_GAP_EVENT_PERIODIC_SYNC_LOST:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PERIODIC_SYNC_LOST");
-        break;
-    case BLE_GAP_EVENT_SCAN_REQ_RCVD:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_SCAN_REQ_RCVD");
-        break;
-    case BLE_GAP_EVENT_PERIODIC_TRANSFER:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PERIODIC_TRANSFER");
-        break;
-    case BLE_GAP_EVENT_PATHLOSS_THRESHOLD:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_PATHLOSS_THRESHOLD");
-        break;
-    case BLE_GAP_EVENT_TRANSMIT_POWER:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_TRANSMIT_POWER");
-        break;
-    case BLE_GAP_EVENT_SUBRATE_CHANGE:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_SUBRATE_CHANGE");
-        break;
-    case BLE_GAP_EVENT_VS_HCI:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_VS_HCI");
-        break;
-    case BLE_GAP_EVENT_REATTEMPT_COUNT:
-        ESP_LOGI("GAP", "BLE_GAP_EVENT_REATTEMPT_COUNT");
-        break;
-    default:
-        ESP_LOGI("GAP", "event: %d", event->type);
-        break;
+    default: log_ble_gap_event(event, arg);
     }
 
     return 0;
@@ -469,31 +400,31 @@ void improv_set_state(uint8_t new_state)
     if (new_state != status) {
         ESP_LOGI(TAG, "Setting state: %s -> %s", get_state_str(status), get_state_str(new_state));
         status = new_state;
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(&status, sizeof(status));
 
         if (conn_hdl && status != STATE_STOPPED) {
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(&status, sizeof(status));
             ble_gattc_notify_custom(conn_hdl, status_char_att_hdl, om);
         }
 
         switch (new_state) {
         case STATE_STOPPED:
-            identify(LED_IMPROV_STOPPED);
+            led_pattern(LED_IMPROV_STOPPED);
             break;
         case STATE_AWAITING_AUTHORIZATION:
-            identify_stop(LED_IMPROV_WAIT_CREDENTIALS);
-            identify(LED_IMPROV_WAIT_AUTHORIZATION);
+            led_pattern(LED_IMPROV_WAIT_AUTHORIZATION);
             break;
         case STATE_AUTHORIZED:
-            identify_stop(LED_IMPROV_WAIT_AUTHORIZATION);
-            identify(LED_IMPROV_WAIT_CREDENTIALS);
+            led_pattern(LED_IMPROV_WAIT_CREDENTIALS);
+            // Specification: if the gadget required authorization, the authorization reset timeout should start over.
+#ifdef CONFIG_IMPROV_WIFI_AUTHENTICATION_BUTTON
+            start_authorized_timer();
+#endif
             break;
         case STATE_PROVISIONING:
-            identify_stop(LED_IMPROV_WAIT_CREDENTIALS);
-            identify(LED_IMPROV_PROVISIONING);
+            led_pattern(LED_IMPROV_PROVISIONING);
             break;
         case STATE_PROVISIONED:
-            identify_stop(LED_IMPROV_PROVISIONING);
-            identify(LED_IMPROV_PROVISIONED);
+            led_pattern(LED_IMPROV_PROVISIONED);
             break;
         }
     }
@@ -512,8 +443,7 @@ void improv_set_error(uint8_t new_error)
         }
 
         if (new_error == ERROR_UNABLE_TO_CONNECT) {
-            identify_stop(LED_IMPROV_PROVISIONING);
-            identify(LED_IMPROV_FAILED);
+            led_pattern(LED_IMPROV_FAILED);
         }
     }
 }
@@ -537,14 +467,17 @@ void start_authorized_timer()
 {
     ESP_LOGI(TAG, "Starting authorization timeout: %ds", CONFIG_IMPROV_WIFI_AUTHENTICATION_TIMEOUT);
 
-    if (authorized_timer) {
-        xTimerDelete(authorized_timer, 0);
+    if (!authorized_timer) {
+        authorized_timer = xTimerCreate("authorized-timeout",
+                                        pdMS_TO_TICKS(CONFIG_IMPROV_WIFI_AUTHENTICATION_TIMEOUT * 1000),
+                                        pdFALSE, NULL, on_authorized_timeout);
+        if (authorized_timer == NULL) {
+            ESP_LOGE(TAG, "Could not create authorized timer");
+            return;
+        }
     }
-    authorized_timer = xTimerCreate("authorized-timeout",
-                                    pdMS_TO_TICKS(CONFIG_IMPROV_WIFI_AUTHENTICATION_TIMEOUT * 1000),
-                                    false, NULL, on_authorized_timeout);
     if (xTimerStart(authorized_timer, 0) != pdPASS) {
-        ESP_LOGE(TAG, "Could not create authorized timer");
+        ESP_LOGE(TAG, "Could not start authorized timer");
     }
 }
 
@@ -559,8 +492,6 @@ void on_improv_authorized()
     ESP_LOGI(TAG, "Authorization through button press");
 
     improv_set_state(STATE_AUTHORIZED);
-
-    start_authorized_timer();
 }
 
 void on_authorized_timeout()
@@ -582,14 +513,16 @@ void init_improv()
 #endif
 
     // Set initial state
+    if (!conn_hdl) {
+        improv_set_state(STATE_STOPPED);
+        return;
+    }
     // Specification: the Improv service can optionally require physical authorization to allow pairing, like pressing a button.
 #ifdef CONFIG_IMPROV_WIFI_AUTHENTICATION_BUTTON
-    status = STATE_AWAITING_AUTHORIZATION;
-    identify(LED_IMPROV_WAIT_AUTHORIZATION);
+    improv_set_state(STATE_AWAITING_AUTHORIZATION);
 #else
     // Specification: a gadget that does not require authorization should start in the "authorized" state.
-    status = STATE_AUTHORIZED;
-    identify(LED_IMPROV_WAIT_CREDENTIALS);
+    improv_set_state(STATE_AUTHORIZED);
 #endif
 }
 
@@ -659,37 +592,6 @@ void ble_app_on_sync(void)
     ble_app_advertise();
 }
 
-void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
-{
-    char buf[BLE_UUID_STR_LEN];
-
-    switch (ctxt->op) {
-    case BLE_GATT_REGISTER_OP_SVC:
-        MODLOG_DFLT(DEBUG, "registered service %s with handle=%d\n",
-                    ble_uuid_to_str(ctxt->svc.svc_def->uuid, buf),
-                    ctxt->svc.handle);
-        break;
-
-    case BLE_GATT_REGISTER_OP_CHR:
-        MODLOG_DFLT(DEBUG, "registering characteristic %s with "
-                    "def_handle=%d val_handle=%d\n",
-                    ble_uuid_to_str(ctxt->chr.chr_def->uuid, buf),
-                    ctxt->chr.def_handle,
-                    ctxt->chr.val_handle);
-        break;
-
-    case BLE_GATT_REGISTER_OP_DSC:
-        MODLOG_DFLT(DEBUG, "registering descriptor %s with handle=%d\n",
-                    ble_uuid_to_str(ctxt->dsc.dsc_def->uuid, buf),
-                    ctxt->dsc.handle);
-        break;
-
-    default:
-        assert(0);
-        break;
-    }
-}
-
 void host_task(void *param)
 {
     nimble_port_run();
@@ -704,7 +606,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    init_identify();
+    init_led();
 
     wifi_connect_init(on_wifi_event);
 
@@ -726,8 +628,7 @@ void app_main(void)
 
     ble_hs_cfg.reset_cb = ble_app_on_reset;
     ble_hs_cfg.sync_cb = ble_app_on_sync;
-    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
-    // ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_hs_cfg.gatts_register_cb = log_gatt_svr_register_cb;  // just for logging purposes
 
     ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
 

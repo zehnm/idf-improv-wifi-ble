@@ -40,6 +40,6 @@ void init_button()
     iot_button_register_cb(gpio_btn, BUTTON_DOUBLE_CLICK, button_double_click_cb, NULL);
 }
 
-#else  // CONFIG_IMPROV_WIFI_IDENTIFY_LED_STRIP
+#else  // CONFIG_IMPROV_WIFI_AUTHENTICATION_BUTTON
 void init_button() {}
 #endif
