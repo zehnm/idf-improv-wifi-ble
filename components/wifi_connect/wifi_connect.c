@@ -90,7 +90,7 @@ esp_err_t wifi_connect_sta(uint8_t ssid[32], uint8_t password[64], int timeout)
 
     wifi_config_t wifi_config = {};
     memcpy(wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
-    memcpy(wifi_config.sta.ssid, password, sizeof(wifi_config.sta.password));
+    memcpy(wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
