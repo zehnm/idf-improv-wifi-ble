@@ -17,7 +17,7 @@ Work in progress :-)
 - [x] Connection to the device with https://www.improv-wifi.com/ works:
   - [x] Authorization request (push the button) is shown if authorization is enabled.
   - [x] WiFi provisioning dialog is shown if authorization is disabled.
-- [x] Capablilites, current state, and error state can be read.
+- [x] Capabilities, current state, and error state can be read.
 - [x] Identify command works (except with Chrome on Mac, see below).
 - [x] WiFi credentials are received (except with Chrome on Mac, see below).
 - [x] WiFi connection with received credentials.
@@ -26,18 +26,18 @@ Work in progress :-)
 
 Open issues and missing features:
 - WiFi credentials are not persisted. They are only held in RAM and are not written to NVS.
-- Not all LED drivers are implemented yet for the identification feature:
-  - [x] GPIO LED
-  - [ ] PWN LED
-  - [ ] PWN RGB LED
-  - [x] WS2812 LED strip (no colors yet, just white blinking patterns for now)
+- Not all LED drivers are fully tested yet and LED patterns could be improved. 
 
 ## Development
 
 Developed with Espressif IDF 5 and NimBLE.
 
 Tested with:
-- ESP32 boards: C6
+- ESP32 boards:
+  - ✅ C6
+  - ⁉️ ESP32-S:
+    - IRAM size issue: use size-optimized build. TODO increase size.
+    - Random `stack overflow in task Tmr Svc` panic: increasing `CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH` to 3000 seems to solve it.
 - Development environment:
   - Espressif IDF 5.1.2
   - Visual Studio Code with ESP-IDF extension

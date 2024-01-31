@@ -37,7 +37,10 @@ void on_authorized_timeout();
 TimerHandle_t authorized_timer = NULL;
 #endif
 
-uint16_t conn_hdl;
+// The BLE connection handle is different on various ESP32 models!
+// ESP32C6 starts at 1, ESP32-S at 0! Let's hope the max uint16 value isn't used...
+#define CONN_HANDLE_UNDEF 0xFFFF
+uint16_t conn_hdl = CONN_HANDLE_UNDEF;
 
 uint16_t status_char_att_hdl;
 uint16_t error_char_att_hdl;
@@ -363,12 +366,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI("GAP", "BLE_GAP_EVENT_CONNECT %s", event->connect.status == 0 ? "OK" : "Failed");
         if (event->connect.status != 0) {
             ESP_LOGI("GAP", "Connection attempt failed, starting advertisement.");
-            conn_hdl = 0;
+            conn_hdl = CONN_HANDLE_UNDEF;
             ble_app_advertise();
         } else {
             conn_hdl = event->connect.conn_handle;
             init_improv();
-            ESP_LOGI("GAP", "status handle=%d, error handle=%d, rpc cmd handle=%d, rpc result handle=%d, capabilities handle=%d", status_char_att_hdl,
+            ESP_LOGI("GAP", "CONNECT: conn_handle=%x, status handle=%d, error handle=%d, rpc cmd handle=%d, rpc result handle=%d, capabilities handle=%d",
+                     event->connect.conn_handle,
+                     status_char_att_hdl,
                      error_char_att_hdl,
                      rpc_cmd_char_att_hdl,
                      rpc_result_char_att_hdl,
@@ -379,8 +384,8 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         // Connection terminated; resume advertising.
         ESP_LOGI("GAP", "BLE_GAP_EVENT_DISCONNECT");
-        conn_hdl = 0;
-        init_improv();
+        conn_hdl = CONN_HANDLE_UNDEF;
+        improv_set_state(STATE_STOPPED);
         ble_app_advertise();
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -401,7 +406,7 @@ void improv_set_state(uint8_t new_state)
         ESP_LOGI(TAG, "Setting state: %s -> %s", get_state_str(status), get_state_str(new_state));
         status = new_state;
 
-        if (conn_hdl && status != STATE_STOPPED) {
+        if (conn_hdl != CONN_HANDLE_UNDEF && status != STATE_STOPPED) {
             struct os_mbuf *om = ble_hs_mbuf_from_flat(&status, sizeof(status));
             ble_gattc_notify_custom(conn_hdl, status_char_att_hdl, om);
         }
@@ -438,7 +443,7 @@ void improv_set_error(uint8_t new_error)
         error = new_error;
         struct os_mbuf *om = ble_hs_mbuf_from_flat(&error, sizeof(error));
 
-        if (conn_hdl && status != STATE_STOPPED) {
+        if (conn_hdl != CONN_HANDLE_UNDEF && status != STATE_STOPPED) {
             ble_gattc_notify_custom(conn_hdl, error_char_att_hdl, om);
         }
 
@@ -450,7 +455,7 @@ void improv_set_error(uint8_t new_error)
 
 void improv_send_response(const uint8_t* data, uint16_t length)
 {
-    if (conn_hdl && status != STATE_STOPPED) {
+    if (conn_hdl != CONN_HANDLE_UNDEF && status != STATE_STOPPED) {
         struct os_mbuf *om = ble_hs_mbuf_from_flat(data, length);
         ble_gattc_notify_custom(conn_hdl, rpc_result_char_att_hdl, om);
     }
@@ -513,7 +518,7 @@ void init_improv()
 #endif
 
     // Set initial state
-    if (!conn_hdl) {
+    if (conn_hdl == CONN_HANDLE_UNDEF) {
         improv_set_state(STATE_STOPPED);
         return;
     }
