@@ -85,6 +85,12 @@ esp_err_t wifi_connect_sta(uint8_t ssid[32], uint8_t password[64], int timeout)
 {
     wifi_disconnect();
     attempt_reconnect = true;
+    if (esp_netif) {
+        // TODO research esp-netif handling, when to destroy it when dealing with AP / STA switching.
+        ESP_LOGD(TAG, "wifi_connect_sta: destroying old netif");
+        esp_netif_destroy(esp_netif);
+    }
+    ESP_LOGD(TAG, "wifi_connect_sta: creating new netif");
     esp_netif = esp_netif_create_default_wifi_sta();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
@@ -100,6 +106,11 @@ esp_err_t wifi_connect_sta(uint8_t ssid[32], uint8_t password[64], int timeout)
 esp_err_t wifi_connect_ap(uint8_t ssid[32], uint8_t password[64])
 {
     wifi_disconnect();
+    if (esp_netif) {
+        // TODO research esp-netif handling, when to destroy it when dealing with AP / STA switching.
+        ESP_LOGD(TAG, "wifi_connect_ap: destroying old netif");
+        esp_netif_destroy(esp_netif);
+    }
     esp_netif = esp_netif_create_default_wifi_ap();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 
@@ -122,8 +133,7 @@ void wifi_disconnect(void)
 {
     attempt_reconnect = false;
     esp_wifi_stop();
-    esp_netif_destroy(esp_netif);
-    esp_netif = NULL;
+    // don't call esp_netif_destroy here! Data is still accessed by IDF
 }
 
 char *get_wifi_disconnection_str(wifi_err_reason_t wifi_err_reason)
